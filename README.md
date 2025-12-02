@@ -262,6 +262,18 @@ keine „Illegal Value“-Fehler wirft.
 - Node-Status:
   - `P=…W  In=…%  Out=…%` zur schnellen Kontrolle.
 
+### 8.3 Hinweis Fronius GEN24 (StorCtl_Mod)
+
+Damit die Vorgaben über **InWRte / OutWRte** am Fronius GEN24 überhaupt wirksam werden,
+muss das Modbus-Register
+
+- `40358_StorCtl_Mod`
+
+mit dem Wert **3** beschrieben werden.
+
+Nur dann sind beide Grenzwerte (Laden/Entladen) aktiv und der WR folgt den
+erzwungenen Vorgaben aus `InWRte` / `OutWRte`.
+
 ## 9. Visualisierung (Gira)
 
 ### 9.1 Visu Status Text
