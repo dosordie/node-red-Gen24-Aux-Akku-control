@@ -1,10 +1,3 @@
-
-
----
-
-## 3. `functions/byd2-main-logic.js`
-
-```javascript
 // Node-RED Function: BYD2 Hauptlogik
 // Output 0: msg.payload = P_set_aux (W)  [SBC mit Deadband]
 // Output 1: msg.payload = Debug-Objekt
@@ -26,22 +19,22 @@ const P_SET_DEADBAND_W = 20;   // Änderungen von P_set_aux < 20 W werden ignori
 // -------------------------
 
 const AUX_BAT_MAX_W     = 7680; // Max. Lade-/Entladeleistung Akku 2 laut BYD-Setpoint (für %-Berechnung)
-const AUX_WR_AC_MAX_W   = 3000; // Max. AC-Leistung des kleinen WR (physikalische Grenze am Netz)
+const AUX_WR_AC_MAX_W   = 3300; // Max. AC-Leistung des kleinen WR (physikalische Grenze am Netz)
 
-const BASELOAD_TARGET_W = 400;  // Ziel-Grundlast, die Akku 2 im DIS_BASE (GRID-Modus) maximal decken soll
+const BASELOAD_TARGET_W = 2500;  // Ziel-Grundlast, die Akku 2 im DIS_BASE (GRID-Modus) maximal decken soll /war 768 jetzt 1536 (0,2C) / 2500
 
 const GRID_IMPORT_MIN_W = 150;  // Ab diesem Netzbezug (W) wird GRID-Import als „relevant“ betrachtet
 const GRID_EXPORT_MIN_W = 150;  // Ab dieser Einspeisung (W) wird GRID-Export als „relevant“ betrachtet
-const GRID_TOLERANCE_W  = 50;   // Toleranz-Band um 0 W, um Flattern zu vermeiden
+const GRID_TOLERANCE_W  = 80;   // Toleranz-Band um 0 W, um Flattern zu vermeiden / war 50
 
 
 // -------------------------
 // Delays / Trägheit
 // -------------------------
 
-const DIS_START_DELAY_S       = 40; // Dauer mit relevantem Netzbezug, bevor DIS_BASE (GRID) startet
-const CHG_START_DELAY_S       = 20; // Dauer mit relevantem Export, bevor CHG_SURPLUS startet
-const MIN_STATE_HOLD_TIME_S   = 15; // Mindestzeit, die ein Zustand gehalten werden muss
+const DIS_START_DELAY_S = 40;       // Dauer mit relevantem Netzbezug, bevor DIS_BASE (GRID) startet
+const CHG_START_DELAY_S = 15;       // Dauer mit relevantem Export, bevor CHG_SURPLUS startet // war 20 sek 15.1.26
+const MIN_STATE_HOLD_TIME_S = 15;   // Mindestzeit, die ein Zustand gehalten werden muss // war 15 sek 15.1.26
 
 // Wie lange kleiner Import / 0 W am Netzpunkt anliegen muss,
 // bevor CHG_SURPLUS beendet werden darf (zusätzlich zu anderen Bedingungen)
@@ -61,8 +54,8 @@ const SOC_AUX_MIN_DISCHARGE_DEFAULT = 5;  // Fallback: Unter diesem SoC entlädt
 // Interaktion mit Hauptakku
 // -------------------------
 
-const MAIN_DISCHARGE_WEAK_W   = 200;  // Bis zu dieser Entladeleistung des Hauptakkus ist „leichtes“ Entladen ok
-const MAIN_DISCHARGE_STRONG_W = 500;  // Ab dieser Entladeleistung wird CHG_SURPLUS (Laden Akku 2) beendet/blockiert
+const MAIN_DISCHARGE_WEAK_W   = 70;   // Bis zu dieser Entladeleistung des Hauptakkus ist „leichtes“ Entladen des Hauptakkus ok // War 200
+const MAIN_DISCHARGE_STRONG_W = 120;  // Ab dieser Entladeleistung wird CHG_SURPLUS (Laden Akku 2) beendet/blockiert
 
 // Support-Mode für DIS_BASE (Hauptakku entlasten):
 const MAIN_DIS_SUPPORT_ENTRY_W = 400; // Ab dieser Entladeleistung Hauptakku → SUPPORT-Modus erlaubt
@@ -75,19 +68,37 @@ const MAIN_TO_AUX_CAP_RATIO    = 1.662; // P_aux ≈ P_main / 1.662
 // Schrittweite für Unterstützungsleistung von Akku 2 im SUPPORT-Modus
 const SUPPORT_STEP_W           = 70;    // in W, z.B. 70 W
 
-// Hysterese für Ziel-Leistung im SUPPORT-Modus
+// Hysterese für Ziel-Leistung im SUPPORT-Modus:
+// Neuer Step wird nur übernommen, wenn er sich mind. so stark vom alten Ziel unterscheidet
 const SUPPORT_TARGET_HYST_W    = 100;   // in W – neue Zielstufe nur bei >= 100 W Differenz
+
+
+// -------------------------
+// Anti "Akku2 lädt Akku1" (nur DIS_GRID)
+// -------------------------
+//
+// Problem: Akku2 entlädt, schießt kurz ins Export -> Hauptakku beginnt zu laden (AC-Laden)
+// Lösung: Wenn Export oder Hauptakku lädt, Entladung proportional reduzieren, bis
+//         Pg wieder leicht positiv/kein Export und Hauptakku nicht mehr lädt.
+//
+// Hysterese, damit es nicht flattert:
+const MAIN_CHARGE_STOP_DIS_W    = 120; // ab dieser Ladeleistung Hauptakku -> AntiCharge aktiv
+const MAIN_CHARGE_RELEASE_DIS_W = 40;  // erst darunter wird AntiCharge wieder aus
+//
+// Separate "Down"-Rampe in DIS_GRID, damit wir bei Export/Hauptakku-lädt schnell Richtung 0 kommen:
+const AUX_P_DELTA_MAX_DIS_DOWN_W = 600; // max. Änderung pro Tick beim "Runterregeln" (Richtung 0) in DIS_GRID
 
 
 // -------------------------
 // Ladeleistung begrenzen wenn Akku „voll“ wird
 // -------------------------
 
-const AUX_MAX_CELL_V        = 3.440; // Zellspannungs-Grenze (V), ab der Ladeleistung begrenzt wird
+const AUX_MAX_CELL_V        = 3.44; // Zellspannungs-Grenze (V), ab der Ladeleistung begrenzt wird
 const AUX_MAX_CHARGE_FULL_W = 384;   // Max. Ladeleistung (W), wenn AUX_MAX_CELL_V überschritten ist
 
-// Basis-Limit für Ladeleistung im CHG_SURPLUS (z.B. 0,2C)
-const MAX_CHG_POWER_W       = 1536;  // in W, muss <= AUX_WR_AC_MAX_W sein
+// Basis-Limit für Ladeleistung im CHG_SURPLUS (z.B. 0,2C= 77*20%)
+//const MAX_CHG_POWER_W = 3300;  // in W, muss <= AUX_WR_AC_MAX_W sein, 1536=0,2C, 1690=0,22C, 1920=0,25C, 2310=0,3C 3080=0,4C
+const MAX_CHG_POWER_W = Number(global.get("OstWest_MAX_CHG_POWER") || 1536); // Max Ladeleistung aus Global holen
 
 
 // -------------------------
@@ -95,12 +106,12 @@ const MAX_CHG_POWER_W       = 1536;  // in W, muss <= AUX_WR_AC_MAX_W sein
 // -------------------------
 
 // Laden: schneller hochfahren
-const AUX_P_DELTA_MAX_CHG_W = 200; // max. Änderung pro Tick beim Laden (W)
-const RAMP_MIN_HOLD_CHG_S   = 10;  // min. Zeit zwischen zwei „größer werden“ beim Laden (s)
+const AUX_P_DELTA_MAX_CHG_W = 400; // max. Änderung pro Tick beim Laden (W) // war 200
+const RAMP_MIN_HOLD_CHG_S   = 9;  // min. Zeit zwischen zwei „größer werden“ beim Laden (s) /war 10
 
 // Entladen: wie bisher (träger)
-const AUX_P_DELTA_MAX_DIS_W = 80;  // max. Änderung pro Tick beim Entladen (W)
-const RAMP_MIN_HOLD_DIS_S   = 30;  // min. Zeit zwischen zwei „größer werden“ beim Entladen (s)
+const AUX_P_DELTA_MAX_DIS_W = 160;  // max. Änderung pro Tick beim Entladen (W) // war 80
+const RAMP_MIN_HOLD_DIS_S   = 20;  // min. Zeit zwischen zwei „größer werden“ beim Entladen (s) // war 30
 
 
 // -------------------------
@@ -223,6 +234,9 @@ let wasImportStop     = context.get("wasImportStop")     || false;
 let lastRampTs        = context.get("lastRampTs")        || now;
 let lastSupportTarget = context.get("lastSupportTarget") || 0;
 
+// AntiCharge Latch (damit nicht flackert)
+let antiChargeLatch   = !!context.get("antiChargeLatch");
+
 const isGridImport = (P_grid >  (GRID_IMPORT_MIN_W + GRID_TOLERANCE_W));
 const isGridExport = (P_grid < -(GRID_EXPORT_MIN_W + GRID_TOLERANCE_W));
 
@@ -266,6 +280,19 @@ const tImportStop = importStopSince ? (now - importStopSince) / 1000 : 0;
 
 // State-Haltezeit
 const tStateHold = (now - lastStateTs) / 1000;
+
+
+// ------------------------------------------------------
+// 3.1) AntiCharge-Detect (Hysterese + Latch)
+// ------------------------------------------------------
+//
+// Aktiv wenn Hauptakku sichtbar lädt (P_main_chg), und erst deaktiv wenn deutlich drunter.
+if (!antiChargeLatch) {
+    if (P_main_chg >= MAIN_CHARGE_STOP_DIS_W) antiChargeLatch = true;
+} else {
+    if (P_main_chg <= MAIN_CHARGE_RELEASE_DIS_W) antiChargeLatch = false;
+}
+context.set("antiChargeLatch", antiChargeLatch);
 
 
 // ------------------------------------------------------
@@ -367,7 +394,8 @@ if (state === STATE_FREEZE) {
                 if (!auxDischargeEnable || SoC_aux <= SOC_AUX_MIN_DISCHARGE) {
                     exit = true;
                 } else if (disMode === DIS_MODE_GRID) {
-                    if (P_grid <= 0) exit = true;
+                    // NEU: Nur raus, wenn kein Import mehr UND bereits keine Entladung mehr aktiv
+                    if (P_grid <= 0 && lastPset === 0) exit = true;
                 } else if (disMode === DIS_MODE_SUPPORT) {
                     if (P_main_dis < MAIN_DIS_SUPPORT_EXIT_W) exit = true;
                 }
@@ -396,6 +424,10 @@ if (state === STATE_FREEZE) {
 // ------------------------------------------------------
 
 let P_set_aux_new = 0;
+
+// Debug-Hilfswerte für AntiCharge (nur Info)
+let antiChargeActiveW = 0;   // wieviel W wir Richtung 0 "wegnehmen"
+let noExportActiveW   = 0;   // Anteil aus Export
 
 if (nextState === STATE_CHG_SURPLUS && !failsafeReason) {
 
@@ -430,15 +462,53 @@ if (nextState === STATE_CHG_SURPLUS && !failsafeReason) {
 
     if (disMode === DIS_MODE_GRID) {
 
-        let P_base_need;
-        if (isFiniteNumber(P_house) && P_house > 0) {
-            P_base_need = Math.min(P_house, BASELOAD_TARGET_W);
+        // NEU: Entladung dynamisch über P_grid regeln
+        // lastPset ist bisherige Entladeleistung (negativ), wir korrigieren darum herum:
+        let P_old    = (lastPset < 0 ? lastPset : 0); // sicherstellen, dass wir von <=0 starten
+        let P_target = P_old;
+
+        let P_corr = 0;
+        if (P_grid > GRID_TOLERANCE_W) {
+            // Import: wir entladen zu wenig → stärker entladen
+            P_corr = P_grid;           // z.B. Pg=+300 → mehr negative Leistung
+        } else if (P_grid < -GRID_TOLERANCE_W) {
+            // Export: wir entladen zu viel → Entladung reduzieren
+            P_corr = P_grid;           // z.B. Pg=-200 → Entladung etwas kleiner
         } else {
-            P_base_need = Math.min(Math.max(P_grid, 0), BASELOAD_TARGET_W);
+            P_corr = 0;                // nahe 0 → halten
         }
 
-        let target    = Math.min(P_base_need, BASELOAD_TARGET_W, AUX_WR_AC_MAX_W);
-        P_set_aux_new = -Math.max(0, Math.round(target));  // negativ = Entladen
+        P_target = P_old - P_corr;     // negative Werte = Entladen
+
+        // -------------------------
+        // NEU: Anti "Akku2 lädt Akku1" (Option B proportional)
+        // -------------------------
+        //
+        // Wenn Export oder Hauptakku lädt -> Entladung proportional reduzieren (Richtung 0),
+        // bis Pg nicht mehr negativ ist und Hauptakku nicht mehr lädt.
+        //
+        // Export-Anteil:
+        if (P_grid < -GRID_TOLERANCE_W) {
+            noExportActiveW = (-P_grid);          // z.B. Pg=-200 => 200W weniger entladen
+            antiChargeActiveW += noExportActiveW;
+        }
+
+        // Hauptakku-Laden-Anteil (Latch/Hysterese oben):
+        if (antiChargeLatch) {
+            antiChargeActiveW += Math.max(0, P_main_chg); // z.B. 300W laden => 300W weniger entladen
+        }
+
+        // Apply: P_target ist negativ -> + antiChargeActiveW reduziert Betrag Richtung 0
+        if (antiChargeActiveW > 0) {
+            P_target = P_target + antiChargeActiveW;
+        }
+
+        const maxDis = Math.min(BASELOAD_TARGET_W, AUX_WR_AC_MAX_W);
+
+        if (P_target < -maxDis) P_target = -maxDis;
+        if (P_target > 0)       P_target = 0;
+
+        P_set_aux_new = Math.round(P_target);
 
     } else if (disMode === DIS_MODE_SUPPORT) {
 
@@ -462,7 +532,7 @@ if (nextState === STATE_CHG_SURPLUS && !failsafeReason) {
         }
 
         if (P_aux_target < SUPPORT_STEP_W) {
-            P_set_aux_new    = 0;
+            P_set_aux_new     = 0;
             lastSupportTarget = 0;
         } else {
             P_set_aux_new     = -P_aux_target;
@@ -473,7 +543,7 @@ if (nextState === STATE_CHG_SURPLUS && !failsafeReason) {
     }
 
 } else {
-    P_set_aux_new    = 0;
+    P_set_aux_new     = 0;
     lastSupportTarget = 0;
     context.set("lastSupportTarget", lastSupportTarget);
 }
@@ -500,9 +570,21 @@ const isCharging    = (P_set_aux_new > 0);
 const isDischarging = (P_set_aux_new < 0);
 
 // min. Haltezeit und max. Delta je nach Richtung
-const rampHoldMinS  = isCharging ? RAMP_MIN_HOLD_CHG_S  : RAMP_MIN_HOLD_DIS_S;
-const rampDeltaMaxW = isCharging ? AUX_P_DELTA_MAX_CHG_W: AUX_P_DELTA_MAX_DIS_W;
+let rampHoldMinS    = isCharging ? RAMP_MIN_HOLD_CHG_S   : RAMP_MIN_HOLD_DIS_S;
+let rampDeltaMaxW   = isCharging ? AUX_P_DELTA_MAX_CHG_W : AUX_P_DELTA_MAX_DIS_W;
 
+// NEU: DIS_GRID "Down"-Rampe schneller, wenn Export oder Hauptakku lädt
+const isDisGridMode = (nextState === STATE_DIS_BASE && disMode === DIS_MODE_GRID && isDischarging);
+const guardDownActive = isDisGridMode && (antiChargeActiveW > 0); // Export/Hauptakku-lädt Anteil aktiv?
+
+// Wenn wir im DIS_GRID gerade runterregeln (Betrag kleiner) und Guard aktiv ist,
+// dann schneller Richtung 0 (ohne zusätzliche Hold-Blockade).
+if (guardDownActive && (magNew < magOld)) {
+    rampDeltaMaxW = Math.max(rampDeltaMaxW, AUX_P_DELTA_MAX_DIS_DOWN_W);
+    // runterregeln soll sofort dürfen -> keine holdMagnitude wegen Zeitfenster
+}
+
+// Bestehende Hold-Logik (für "größer werden")
 if (isDischarging && isSupportMode) {
     // Support-Modus: wie bisher „träger“
     const magnitudeChanged = (magNew !== magOld);
@@ -513,6 +595,11 @@ if (isDischarging && isSupportMode) {
     // Standard: bei größerer Stellgröße nur alle rampHoldMinS hochfahren
     if (magnitudeIncreases && dtRamp < rampHoldMinS) {
         holdMagnitude = true;
+    }
+
+    // NEU: wenn guardDownActive und wir kleiner werden, NICHT halten
+    if (guardDownActive && (magNew < magOld)) {
+        holdMagnitude = false;
     }
 }
 
@@ -552,6 +639,15 @@ else if (auxChargeEnable)                 freeStr += "L";
 else if (auxDischargeEnable)              freeStr += "D";
 else                                      freeStr += "-";
 
+// Status-Flags für DIS_GRID
+let disFlags = "";
+if (dbgState === "DIS_GRID") {
+    const flags = [];
+    if (P_grid < -GRID_TOLERANCE_W) flags.push("EXP");
+    if (antiChargeLatch)            flags.push("A1CHG");
+    if (flags.length) disFlags = " [" + flags.join(",") + "]";
+}
+
 const dbg = {
     state:              dbgState,
     stateBase:          nextState,
@@ -577,7 +673,12 @@ const dbg = {
     chargeLimitActive,
     auxLimitFullEnable,
     auxCellMaxV,
-    effectiveMaxChargeW
+    effectiveMaxChargeW,
+
+    // NEU Debug:
+    antiChargeLatch,
+    antiChargeActiveW,   // Summe der "wegnehm"-W (Export + Hauptakku-Laden)
+    noExportActiveW      // nur Exportanteil
 };
 
 let statusColor = "grey";
@@ -598,7 +699,7 @@ switch (nextState) {
     case STATE_DIS_BASE:
         if (disMode === DIS_MODE_GRID) {
             statusColor = "yellow";
-            statusText  = `DIS_GRID ${freeStr} P=${P_set_aux.toFixed(0)}W Pg=${P_grid.toFixed(0)}W SoC_aux=${SoC_aux}%`;
+            statusText  = `DIS_GRID${disFlags} ${freeStr} P=${P_set_aux.toFixed(0)}W Pg=${P_grid.toFixed(0)}W SoC_aux=${SoC_aux}%`;
         } else {
             statusColor = "orange";
             statusText  = `DIS_SUPPORT ${freeStr} P=${P_set_aux.toFixed(0)}W Pg=${P_grid.toFixed(0)}W SoC_aux=${SoC_aux}%`;
